@@ -19,7 +19,6 @@ use near_sdk::{
     PromiseOrValue, PromiseResult, PublicKey,
 };
 use serde::Serialize;
-
 mod events;
 
 #[near_bindgen]
