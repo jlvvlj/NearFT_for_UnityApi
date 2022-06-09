@@ -10,13 +10,18 @@ Handles user with a pre-created Near account and implements progressive onboardi
 
 Build with wasm-unknown-unknown 
 
-´´´
+```
 cargo test 
-´´´
+test tests::test_default - should panic ... ok
+test tests::test_create_account ... ok
+test tests::test_invalid_transfer - should panic ... ok
+test tests::test_valid_transfer ... ok
+test tests::test_new ... ok
+```
 ### Interfaces
-´´´
+```
 
-´´´
+```
 
 ### TO DO
 
