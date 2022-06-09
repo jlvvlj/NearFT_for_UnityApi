@@ -27,4 +27,5 @@ test tests::test_new ... ok
 
 - Simulation test with metaseed-unity-toolkit
 - Plain Javascript Simulation Test
-- Allow to set an API Wallet 
+- Allow to set an API Wallet different from contract_owner
+- Find and document an easy install for unity project
