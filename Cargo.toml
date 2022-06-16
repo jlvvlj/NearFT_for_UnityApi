@@ -8,8 +8,13 @@ authors = ["Eh1Ka6"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+ed25519 = "1.5.2"
+ed25519-dalek = "1.0.1"
 near-contract-standards = "4.0.0"
 near-sdk = "4.0.0"
+rand = "0.8.5"
+rand_core = "0.6.3"
+rand_os = "0.2.2"
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 [profile.release]

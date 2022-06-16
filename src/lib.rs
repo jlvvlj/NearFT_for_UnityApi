@@ -7,6 +7,8 @@
 //////
 
 pub use crate::events::*;
+extern crate ed25519;
+extern crate rand;
 use near_contract_standards::fungible_token::metadata::{
     FungibleTokenMetadata, FungibleTokenMetadataProvider, FT_METADATA_SPEC,
 };
@@ -21,6 +23,10 @@ use near_sdk::{
 use serde::Serialize;
 mod events;
 
+use ed25519_dalek::Keypair;
+//use rand::rngs::OsRng;
+use ed25519_dalek::Signature;
+use rand_os::OsRng;
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct UnitesContract {
@@ -28,10 +34,9 @@ pub struct UnitesContract {
     metadata: LazyOption<FungibleTokenMetadata>,
     owner: AccountId,
     unites_for_player_accounts: LookupMap<AccountId, u128>,
-    // tresor_wallet 
-    // pool_subaccount_wallet
-    // voir:ingame token
-    // ratio ingame / offgame // changeable par le owner 
+    vault: AccountId,
+    authorized_game_api: LookupMap<AccountId, u128>,
+    apis_ratio: LookupMap<AccountId, u128>,
 }
 
 const DATA_IMAGE_SVG_NEAR_ICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 288 288'%3E%3Cg id='l' data-name='l'%3E%3Cpath d='M187.58,79.81l-30.1,44.69a3.2,3.2,0,0,0,4.75,4.2L191.86,103a1.2,1.2,0,0,1,2,.91v80.46a1.2,1.2,0,0,1-2.12.77L102.18,77.93A15.35,15.35,0,0,0,90.47,72.5H87.34A15.34,15.34,0,0,0,72,87.84V201.16A15.34,15.34,0,0,0,87.34,216.5h0a15.35,15.35,0,0,0,13.08-7.31l30.1-44.69a3.2,3.2,0,0,0-4.75-4.2L96.14,186a1.2,1.2,0,0,1-2-.91V104.61a1.2,1.2,0,0,1,2.12-.77l89.55,107.23a15.35,15.35,0,0,0,11.71,5.43h3.13A15.34,15.34,0,0,0,216,201.16V87.84A15.34,15.34,0,0,0,200.66,72.5h0A15.35,15.35,0,0,0,187.58,79.81Z'/%3E%3C/g%3E%3C/svg%3E";
@@ -81,42 +86,50 @@ impl UnitesContract {
     }
     #[init]
     pub fn new(owner_id: AccountId, total_supply: U128, metadata: FungibleTokenMetadata) -> Self {
-
         assert!(!env::state_exists(), "Already initialized");
         metadata.assert_valid();
+        // Funds are stored within the contract
+        let vault_id = env::current_account_id();
         let mut this = Self {
             token: FungibleToken::new(b"a".to_vec()),
             metadata: LazyOption::new(b"m".to_vec(), Some(&metadata)),
             owner: owner_id,
+            // See to set it to a contract adresse
+            vault: vault_id,
             unites_for_player_accounts: LookupMap::new(b"c".to_vec()),
+            authorized_game_api: LookupMap::new(b"o".to_vec()),
+            apis_ratio: LookupMap::new(b"p".to_vec()),
         };
         this.token.internal_register_account(&this.owner);
+        this.token.internal_register_account(&this.vault);
         this.token
-            .internal_deposit(&this.owner, total_supply.into());
+            .internal_deposit(&this.vault, total_supply.into());
         near_contract_standards::fungible_token::events::FtMint {
             owner_id: &this.owner,
             amount: &total_supply,
-            memo: Some("Initial tokens supply is minted"),
+            memo: Some("Initial tokens supply minted and deposited into the vault"),
         }
         .emit();
-        this 
+        this
     }
     #[payable]
-    /// Progressive onboarding for Player without  NEAR account
-    pub fn create_account(
+    /// Creating contract subaccount for API
+    /// Owner Only
+    pub fn create_api_account(
         &mut self,
-        new_account_id: AccountId,
-        new_public_key: PublicKey) -> Promise {
-        // add check function reserved to owner
-        assert_eq!(
-            env::predecessor_account_id(),
-            self.owner,
-            "Function can only be called from the owner"
+        api_id: AccountId,
+        new_public_key: PublicKey,
+    ) -> Promise {
+        // function reserved to owner
+        assert!(
+            env::predecessor_account_id() == self.owner, 
+            "Not authorized"
         );
-
+        let format =format!("{}.{}", api_id, env::current_account_id());
         let amount = env::attached_deposit();
-        assert_eq!(amount, 1, "Attached deposit is 0");
-        Promise::new(env::predecessor_account_id())
+        let new_account_id : AccountId = AccountId::new_unchecked(format);
+        
+        Promise::new(new_account_id.clone())
             .create_account()
             .add_full_access_key(new_public_key.into())
             .transfer(amount)
@@ -127,11 +140,12 @@ impl UnitesContract {
             ))
     }
     /// create_account Callback [To be tested]
-    pub fn on_account_created(
+    pub fn on_api_account_created(
         &mut self,
         predecessor_account_id: AccountId,
         amount: U128,
-        new_account_id: AccountId) -> bool {
+        new_account_id: AccountId,
+    ) -> bool {
         assert_eq!(
             env::predecessor_account_id(),
             env::current_account_id(),
@@ -147,7 +161,7 @@ impl UnitesContract {
         assert_eq!(creation_succeeded, false, "That succeeded");
         self.register_account_as_player(new_account_id.clone());
         // Construct the mint log as per the events standard.
-        let nft_mint_log: EventLog = EventLog {
+        let log: EventLog = EventLog {
             standard: "Create account standard".to_string(),
             version: "alpha".to_string(),
             // The data related with the event stored in a vector.
@@ -162,27 +176,118 @@ impl UnitesContract {
         };
 
         // Log the serialized json.
-        env::log_str(&nft_mint_log.to_string());
+        env::log_str(&log.to_string());
         creation_succeeded
     }
-    /// register an existing account as a player
+    #[payable]
+    /// Progressive onboarding for Player without NEAR account
+    /// Apis Only
+    pub fn create_account(
+        &mut self,
+        new_account_id: AccountId,
+        new_public_key: PublicKey,
+    ) -> Promise {
+        //function reserved to apis only 
+        assert!(
+            self.authorized_game_api.contains_key(&env::predecessor_account_id()), 
+            "Not authorized"
+        );
+
+        let amount = env::attached_deposit();
+        Promise::new(new_account_id.clone())
+            .create_account()
+            .add_full_access_key(new_public_key.into())
+            .transfer(amount)
+            .then(ext_self::ext(env::current_account_id()).on_account_created(
+                env::predecessor_account_id(),
+                amount.into(),
+                new_account_id,
+            ))
+    }
+    /// create_account Callback [To be tested]
+    pub fn on_account_created(
+        &mut self,
+        predecessor_account_id: AccountId,
+        amount: U128,
+        new_account_id: AccountId,
+    ) -> bool {
+        assert_eq!(
+            env::predecessor_account_id(),
+            env::current_account_id(),
+            "Callback can only be called from the contract"
+        );
+        let creation_succeeded = is_promise_success();
+        // check if AccountId is valid
+        if !creation_succeeded {
+            // In case of failure, send funds back.
+            Promise::new(predecessor_account_id).transfer(amount.into());
+            assert_eq!(creation_succeeded, false, "That failed")
+        }
+        assert_eq!(creation_succeeded, false, "That succeeded");
+        self.register_account_as_player(new_account_id.clone());
+        // Construct the mint log as per the events standard.
+        let log: EventLog = EventLog {
+            standard: "Create account standard".to_string(),
+            version: "alpha".to_string(),
+            // The data related with the event stored in a vector.
+            event: EventLogVariant::AccCreated(vec![AccCreatedLog {
+                // Owner of the token.
+                owner_id: self.owner.to_string(),
+                // Vector of token IDs that were minted.
+                acc_created: new_account_id.to_string(),
+                // An optional memo to include.
+                memo: None,
+            }]),
+        };
+
+        // Log the serialized json.
+        env::log_str(&log.to_string());
+        creation_succeeded
+    }
+
+    // should be restricted to owner
+    fn add_whitelisted_api(&mut self, account_id: AccountId, amount: u128) {
+        log!(
+            "Registering new Game Api  @{} with Vault allowance @{}",
+            account_id,
+            amount
+        );
+        assert!(
+            env::predecessor_account_id() == self.owner,
+            "Not authorized"
+        );
+        assert!(
+            env::is_valid_account_id(&account_id.as_bytes().to_vec()),
+            "Account Id invalid"
+        );
+        assert!(
+            self.authorized_game_api.contains_key(&account_id) == false,
+            "Account already existing"
+        );
+        self.authorized_game_api.insert(&account_id, &amount);
+    }
+
+    /// APIs Only
     pub fn register_account_as_player(&mut self, account_id: AccountId) {
         log!("Registering existing Account @{}", account_id);
-
+        assert!(
+            self.authorized_game_api.contains_key(&env::predecessor_account_id()),
+            "Not authorized"
+        );
         assert!(
             env::is_valid_account_id(&account_id.as_bytes().to_vec()),
             "Account Id invalid"
         );
         self.unites_for_player_accounts.insert(&account_id, &0);
     }
+    
     /// Set available Unites for player Account
-    /// Can only be called by contract owner 
+    /// APIs Only
     pub fn set_available_unites_to_player(&mut self, account_id: AccountId, amount: u128) {
         // add check function reserved to owner
-        assert_eq!(
-            env::predecessor_account_id(),
-            self.owner,
-            "Function can only be called from the owner"
+        assert!(
+            self.authorized_game_api.contains_key(&env::predecessor_account_id()), 
+            "Not authorized"
         );
         self.unites_for_player_accounts.insert(&account_id, &amount);
     }
@@ -211,17 +316,23 @@ impl FungibleTokenMetadataProvider for UnitesContract {
 // overriding transfer functions
 #[near_bindgen]
 impl UnitesContract {
-    /// Overidden function to  limit owner transfers to unknown users 
+    /// Overidden function to  limit owner transfers to unknown users
     #[payable]
     fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>) {
-        if env::predecessor_account_id() == self.owner {
+        if self.authorized_game_api.contains_key(&env::predecessor_account_id()) {
             log!("Verify Allowance for witdrawal by {}", receiver_id);
+            let api_allowance = match self.authorized_game_api.get(&env::predecessor_account_id()) {
+                Some(unites) => unites > 0,
+                None => false,
+            };
+            assert_ne!(api_allowance, false, "Game Api is out of funds"); 
 
             let allowance = match self.unites_for_player_accounts.get(&receiver_id) {
                 Some(unites) => unites > 0,
                 None => false,
             };
             assert_ne!(allowance, false, "Allowance is 0")
+
         }
         // reduire l'autorisation avant de faire le transfer
         self.token.ft_transfer(receiver_id, amount, memo)
@@ -271,13 +382,14 @@ mod tests {
     }
 
     #[test]
+    /// Check that the contract holds the minted funds
     fn test_new() {
         let mut context = get_context(accounts(1));
         testing_env!(context.build());
         let contract = UnitesContract::new_default_meta(accounts(1).into(), TOTAL_SUPPLY.into());
         testing_env!(context.is_view(true).build());
         assert_eq!(contract.ft_total_supply().0, TOTAL_SUPPLY);
-        assert_eq!(contract.ft_balance_of(accounts(1)).0, TOTAL_SUPPLY);
+        assert_eq!(contract.ft_balance_of(contract.vault.clone()).0, TOTAL_SUPPLY);
     }
 
     #[test]
@@ -286,6 +398,10 @@ mod tests {
         let context = get_context(accounts(1));
         testing_env!(context.build());
         let _contract = UnitesContract::default();
+    }
+    #[test] 
+    fn  test_apis() {
+
     }
 
     #[test]
@@ -310,6 +426,7 @@ mod tests {
             .build());
         let transfer_amount = TOTAL_SUPPLY / 3;
         contract.ft_transfer(accounts(1), transfer_amount.into(), None);
+        
         testing_env!(context
             .storage_usage(env::storage_usage())
             .account_balance(env::account_balance())
@@ -343,8 +460,8 @@ mod tests {
             .build());
         let transfer_amount = TOTAL_SUPPLY / 3;
 
-        // Web app  qui  verifie que les ingames sont valables 
-        // l'utilisateur apuuie sur submit 
+        // Web app  qui  verifie que les ingames sont valables
+        // l'utilisateur apuuie sur submit
         contract.register_account_as_player(accounts(1));
         contract.set_available_unites_to_player(accounts(1), transfer_amount.into());
         contract.ft_transfer(accounts(1), transfer_amount.into(), None);
@@ -382,6 +499,28 @@ mod tests {
             .predecessor_account_id(accounts(2))
             .build());
         let transfer_amount = TOTAL_SUPPLY / 3;
+        let mut key = [0u8; 16];
+        let mut rngs = OsRng{};
+        let keypair:Keypair  = Keypair::generate(&mut rngs);
+        let game_api = AccountId::new_unchecked(
+            "GameaApi".parse().unwrap()
+        ); 
+        println!("{:?}",keypair.public);
+       
+        contract.create_api_account(
+            game_api,
+            "qSq3LoufLvTCTNGC3LJePMDGWok8dHMQ5A1YD9psbiz"
+                .parse()
+                .unwrap(),
+        );
+        let game_api2 = AccountId::new_unchecked(
+            "GameaApi".parse().unwrap()
+        ); 
+        testing_env!(context
+            .storage_usage(env::storage_usage())
+            .attached_deposit(1)
+            .predecessor_account_id(game_api2)
+            .build());
         contract.create_account(
             AccountId::new_unchecked("newplayer".to_string()),
             "qSq3LoufLvTCTNGC3LJePMDGrok8dHMQ5A1YD9psbiz"
