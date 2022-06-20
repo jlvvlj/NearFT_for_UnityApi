@@ -222,7 +222,7 @@ impl UnitesContract {
             // In case of failure, send funds back.
             Promise::new(predecessor_account_id).transfer(amount.into());
             assert_eq!(creation_succeeded, false, "That failed")
-        }
+        }test
         assert_eq!(creation_succeeded, false, "That succeeded");
         self.register_account_as_player(new_account_id.clone());
         // Construct the mint log as per the events standard.
