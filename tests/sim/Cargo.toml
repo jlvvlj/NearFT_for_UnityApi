@@ -1,0 +1,26 @@
+[package]
+name = "sim"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+near-sdk = "4.0.0"
+anyhow = "1.0"
+borsh = "0.9"
+maplit = "1.0"
+near-units = "0.2.0"
+# arbitrary_precision enabled for u128 types that workspaces requires for Balance types
+serde_json = { version = "1.0", features = ["arbitrary_precision"] }
+tokio = { version = "1.18.1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.11", features = ["env-filter"] }
+workspaces = { version = "0.3.0" , features = ["unstable"] }
+pkg-config = "0.3.1"
+
+[[example]]
+name = "integration-tests"
+path = "src/tests.rs"
+
+[dependencies]
+near-crypto = "0.14.0"
+serde = "1.0.137"

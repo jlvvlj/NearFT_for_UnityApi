@@ -7,8 +7,7 @@
 //////
 
 pub use crate::events::*;
-extern crate ed25519;
-extern crate rand;
+
 use near_contract_standards::fungible_token::metadata::{
     FungibleTokenMetadata, FungibleTokenMetadataProvider, FT_METADATA_SPEC,
 };
@@ -23,10 +22,6 @@ use near_sdk::{
 use serde::Serialize;
 mod events;
 
-use ed25519_dalek::Keypair;
-//use rand::rngs::OsRng;
-use ed25519_dalek::Signature;
-use rand_os::OsRng;
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct UnitesContract {
@@ -49,8 +44,21 @@ pub trait ExtUnites {
     fn on_account_created(
         &mut self,
         predecessor_account_id: AccountId,
-        amount: U128,
+        transfer_amount: U128,
         new_account_id: AccountId,
+    ) -> bool;
+    fn on_api_account_created(
+        &mut self,
+        predecessor_account_id: AccountId,
+        vault_allowance: U128,
+        transfer_amount: U128,
+        new_account_id: AccountId,
+    ) -> bool;
+    fn on_withdraw (
+        &mut self,
+        predecessor_account_id: AccountId,
+        transfer_amount: U128,
+        memo: Option<String>,
     ) -> bool;
 }
 /// Helper for promise Result
@@ -119,23 +127,25 @@ impl UnitesContract {
         &mut self,
         api_id: AccountId,
         new_public_key: PublicKey,
+        vault_allowance:U128
     ) -> Promise {
         // function reserved to owner
         assert!(
             env::predecessor_account_id() == self.owner, 
-            "Not authorized"
+            "Not authorized {} , {}" , env::predecessor_account_id() , self.owner
         );
-        let format =format!("{}.{}", api_id, env::current_account_id());
-        let amount = env::attached_deposit();
-        let new_account_id : AccountId = AccountId::new_unchecked(format);
         
+        let new_account_id : AccountId = api_id;
+        log!("new public key {:?}", new_public_key);
         Promise::new(new_account_id.clone())
             .create_account()
             .add_full_access_key(new_public_key.into())
-            .transfer(amount)
-            .then(ext_self::ext(env::current_account_id()).on_account_created(
+            .transfer(env::attached_deposit())
+            .then(ext_self::ext(env::current_account_id())
+            .on_api_account_created(
                 env::predecessor_account_id(),
-                amount.into(),
+                vault_allowance.into(),
+                env::attached_deposit().into(),
                 new_account_id,
             ))
     }
@@ -143,7 +153,8 @@ impl UnitesContract {
     pub fn on_api_account_created(
         &mut self,
         predecessor_account_id: AccountId,
-        amount: U128,
+        vault_allowance: U128,
+        transfer_amount: U128,
         new_account_id: AccountId,
     ) -> bool {
         assert_eq!(
@@ -151,17 +162,8 @@ impl UnitesContract {
             env::current_account_id(),
             "Callback can only be called from the contract"
         );
-        let creation_succeeded = is_promise_success();
-        // check if AccountId is valid
-        if !creation_succeeded {
-            // In case of failure, send funds back.
-            Promise::new(predecessor_account_id).transfer(amount.into());
-            assert_eq!(creation_succeeded, false, "That failed")
-        }
-        assert_eq!(creation_succeeded, false, "That succeeded");
-        self.register_account_as_player(new_account_id.clone());
-        // Construct the mint log as per the events standard.
-        let log: EventLog = EventLog {
+          // Construct the mint log as per the events standard.
+          let log: EventLog = EventLog {
             standard: "Create account standard".to_string(),
             version: "alpha".to_string(),
             // The data related with the event stored in a vector.
@@ -174,8 +176,21 @@ impl UnitesContract {
                 memo: None,
             }]),
         };
-
-        // Log the serialized json.
+        let creation_succeeded = is_promise_success();
+        // check if AccountId is valid
+        if !creation_succeeded {
+            // In case of failure, send funds back.
+            Promise::new(predecessor_account_id).transfer(transfer_amount.into());
+          
+            env::log_str(&log.to_string());
+        } 
+        if creation_succeeded {
+            
+        self.add_whitelisted_api(new_account_id.clone(), vault_allowance.into());
+        self.token.internal_register_account(&new_account_id);
+        } 
+      
+        
         env::log_str(&log.to_string());
         creation_succeeded
     }
@@ -186,21 +201,22 @@ impl UnitesContract {
         &mut self,
         new_account_id: AccountId,
         new_public_key: PublicKey,
+        
     ) -> Promise {
         //function reserved to apis only 
         assert!(
             self.authorized_game_api.contains_key(&env::predecessor_account_id()), 
-            "Not authorized"
+            "Not authorized {}", env::predecessor_account_id()
         );
 
         let amount = env::attached_deposit();
         Promise::new(new_account_id.clone())
             .create_account()
             .add_full_access_key(new_public_key.into())
-            .transfer(amount)
+            .transfer(env::attached_deposit())
             .then(ext_self::ext(env::current_account_id()).on_account_created(
                 env::predecessor_account_id(),
-                amount.into(),
+                env::attached_deposit().into(),
                 new_account_id,
             ))
     }
@@ -208,7 +224,7 @@ impl UnitesContract {
     pub fn on_account_created(
         &mut self,
         predecessor_account_id: AccountId,
-        amount: U128,
+        transfer_amount: U128,
         new_account_id: AccountId,
     ) -> bool {
         assert_eq!(
@@ -220,10 +236,10 @@ impl UnitesContract {
         // check if AccountId is valid
         if !creation_succeeded {
             // In case of failure, send funds back.
-            Promise::new(predecessor_account_id).transfer(amount.into());
+            Promise::new(predecessor_account_id).transfer(transfer_amount.into());
             assert_eq!(creation_succeeded, false, "That failed")
-        }test
-        assert_eq!(creation_succeeded, false, "That succeeded");
+        }
+        
         self.register_account_as_player(new_account_id.clone());
         // Construct the mint log as per the events standard.
         let log: EventLog = EventLog {
@@ -253,7 +269,7 @@ impl UnitesContract {
             amount
         );
         assert!(
-            env::predecessor_account_id() == self.owner,
+            env::predecessor_account_id() == self.owner || env::predecessor_account_id() == env::current_account_id(),
             "Not authorized"
         );
         assert!(
@@ -269,9 +285,9 @@ impl UnitesContract {
 
     /// APIs Only
     pub fn register_account_as_player(&mut self, account_id: AccountId) {
-        log!("Registering existing Account @{}", account_id);
+        log!("Registering existing Account @{:?}", account_id);
         assert!(
-            self.authorized_game_api.contains_key(&env::predecessor_account_id()),
+            (self.authorized_game_api.contains_key(&env::predecessor_account_id()) || env::predecessor_account_id() ==  env::current_account_id() ),
             "Not authorized"
         );
         assert!(
@@ -282,14 +298,14 @@ impl UnitesContract {
     }
     
     /// Set available Unites for player Account
-    /// APIs Only
-    pub fn set_available_unites_to_player(&mut self, account_id: AccountId, amount: u128) {
+    /// APIs Only 
+    pub fn set_available_unites_to_player(&mut self, account_id: AccountId, amount: U128) {
         // add check function reserved to owner
         assert!(
-            self.authorized_game_api.contains_key(&env::predecessor_account_id()), 
+            (self.authorized_game_api.contains_key(&env::predecessor_account_id()) ), 
             "Not authorized"
         );
-        self.unites_for_player_accounts.insert(&account_id, &amount);
+        self.unites_for_player_accounts.insert(&account_id, &amount.0);
     }
     /// To be implemented
     fn on_account_closed(&mut self, account_id: AccountId, balance: Balance) {
@@ -319,21 +335,6 @@ impl UnitesContract {
     /// Overidden function to  limit owner transfers to unknown users
     #[payable]
     fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>) {
-        if self.authorized_game_api.contains_key(&env::predecessor_account_id()) {
-            log!("Verify Allowance for witdrawal by {}", receiver_id);
-            let api_allowance = match self.authorized_game_api.get(&env::predecessor_account_id()) {
-                Some(unites) => unites > 0,
-                None => false,
-            };
-            assert_ne!(api_allowance, false, "Game Api is out of funds"); 
-
-            let allowance = match self.unites_for_player_accounts.get(&receiver_id) {
-                Some(unites) => unites > 0,
-                None => false,
-            };
-            assert_ne!(allowance, false, "Allowance is 0")
-
-        }
         // reduire l'autorisation avant de faire le transfer
         self.token.ft_transfer(receiver_id, amount, memo)
     }
@@ -346,17 +347,74 @@ impl UnitesContract {
         memo: Option<String>,
         msg: String,
     ) -> PromiseOrValue<U128> {
-        if env::predecessor_account_id() == self.owner {
+        if self.authorized_game_api.contains_key(&receiver_id) {
             log!("Verify Allowance for witdrawal by {}", receiver_id);
-
-            let allowance = match self.unites_for_player_accounts.get(&receiver_id) {
-                Some(unites) => unites > 0,
+            let api_allowance = match self.authorized_game_api.get(&receiver_id) {
+                Some(unites) => (unites > 0 && unites >= amount.0),
                 None => false,
             };
-            assert_ne!(allowance, false, "Allowance is 0 for {}", receiver_id)
+            assert_ne!(api_allowance, false, "Game Api is out of funds {} ",api_allowance); 
+        }
+        if self.unites_for_player_accounts.contains_key(&receiver_id) {
+            log!("Verify Allowance for witdrawal by {}", receiver_id);
+            let allowance = match self.unites_for_player_accounts.get(&receiver_id) {
+                Some(unites) => (unites > 0 && unites >= amount.0),
+                None => false,
+            };
+            assert_ne!(allowance, false, "Player is out of funds"); 
+
         }
         self.token.ft_transfer_call(receiver_id, amount, memo, msg)
     }
+    fn withdraw(
+        &mut self,
+        
+        amount: U128,
+        memo: Option<String>,
+    ) -> Promise {
+        assert!(self.unites_for_player_accounts.contains_key(&env::predecessor_account_id(),));
+        log!("Verify Allowance for witdrawal for {}", env::predecessor_account_id(),);
+            let test: U128;
+            let is_allowed = match self.unites_for_player_accounts.get(&env::predecessor_account_id(),) {
+                Some(unites) => (unites > 0 && unites >= amount.0),
+                None => false,
+            };
+            assert_ne!(is_allowed, false, "Player is out of funds or not registered");
+            let vault_allowance: u128 = self.unites_for_player_accounts.get(&env::predecessor_account_id(),).unwrap();
+            let rest  = vault_allowance - amount.0;
+            self.unites_for_player_accounts.remove(&env::predecessor_account_id(),); 
+            self.unites_for_player_accounts.insert(&env::predecessor_account_id(),&rest); 
+            // Free the funds from the vault 
+            Promise::new(env::current_account_id()).transfer(1).then(ext_self::ext(env::current_account_id()).on_withdraw(
+                env::predecessor_account_id(),
+                amount,
+                None
+                
+            )
+            )
+        }
+    fn on_withdraw (
+        &mut self,
+        predecessor_account_id: AccountId,
+        transfer_amount: U128,
+        memo: Option<String>
+    ) {
+        assert_eq!(
+            env::predecessor_account_id(),
+            env::current_account_id(),
+            "Callback can only be called from the contract"
+        );
+        let creation_succeeded = is_promise_success();
+        // check if AccountId is valid
+        if !creation_succeeded {
+
+            assert_eq!(creation_succeeded, false, "That failed")
+        }
+        let test = self.token.ft_transfer(predecessor_account_id,transfer_amount,memo);
+        
+        
+    }
+
 }
 
 near_contract_standards::impl_fungible_token_core!(UnitesContract, token, on_tokens_burned);
@@ -367,6 +425,11 @@ mod tests {
     use near_sdk::test_utils::{accounts, VMContextBuilder};
     use near_sdk::MockedBlockchain;
     use near_sdk::{testing_env, Balance};
+    use ed25519_dalek::Keypair;
+    //use rand::rngs::OsRng;
+    use ed25519_dalek::Signature;
+    use rand_os::OsRng;
+
 
     use super::*;
 
@@ -405,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Allowance is 0")]
+    #[should_panic(expected = "Not authorized")]
     fn test_invalid_transfer() {
         let mut context = get_context(accounts(2));
         testing_env!(context.build());
@@ -502,17 +565,19 @@ mod tests {
         let mut key = [0u8; 16];
         let mut rngs = OsRng{};
         let keypair:Keypair  = Keypair::generate(&mut rngs);
+        
         let game_api = AccountId::new_unchecked(
             "GameaApi".parse().unwrap()
         ); 
         println!("{:?}",keypair.public);
        
-        contract.create_api_account(
+       /* contract.create_api_account(
             game_api,
             "qSq3LoufLvTCTNGC3LJePMDGWok8dHMQ5A1YD9psbiz"
                 .parse()
                 .unwrap(),
         );
+        */
         let game_api2 = AccountId::new_unchecked(
             "GameaApi".parse().unwrap()
         ); 
@@ -521,13 +586,13 @@ mod tests {
             .attached_deposit(1)
             .predecessor_account_id(game_api2)
             .build());
-        contract.create_account(
+        /*contract.create_account(
             AccountId::new_unchecked("newplayer".to_string()),
             "qSq3LoufLvTCTNGC3LJePMDGrok8dHMQ5A1YD9psbiz"
                 .parse()
                 .unwrap(),
         );
-
+*/
         assert_eq!(
             contract
                 .ft_balance_of(AccountId::new_unchecked("newplayer".to_string()))
