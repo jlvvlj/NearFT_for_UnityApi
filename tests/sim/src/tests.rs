@@ -9,7 +9,9 @@ use std::env;
 use std::fs::{File};
 use std::io::Write;
 use serde::{Deserialize, Serialize};
-
+use std::str;
+use bs58;
+use hex_string::HexString;
 #[derive(Serialize, Deserialize)]
 pub struct KeyFile {
     pub account_id: String,
@@ -55,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         .await?
         .into_result()?;
 
-    // create api Key pairs
+    // create api Key pairs   //monnom.mongame.moncontrat.near 
     let api_id : String = format!("gameapi.{}",ft_contract.as_account().id());
     let apipub : PubKey = PubKey::from_seed(KeyType::ED25519,"test").into();
     let apisec : SecretKey = SecretKey::from_seed(KeyType::ED25519,"test");
@@ -94,26 +96,18 @@ async fn main() -> anyhow::Result<()> {
     };
     let mydata : String =serde_json::to_string(&data).unwrap();
     writeln!(&mut file, "{}" , mydata );
-    println!("{:?}",temp_file);
+    println!("{:?}",user_pk);
 
     let user_account : Account = Account::from_file(temp_file);
-
-
-    /*  // Create a temporary file.
-    let temp_directory = env::temp_dir();
-    let temp_file = temp_directory.join("file");
-  
-      // Open a file in write-only (ignoring errors).
-      // This creates the file if it does not exist (and empty the file if it exists).
-      let mut file = File::create(&temp_file).unwrap();
-       let string = apisec.unwrap_as_ed25519();
-
-      // Write a &str in the file (ignoring the result).
-      writeln!(&mut file, "{:?}" , string );
-    let signer : InMemorySigner = InMemorySigner::from_file(&temp_file);
-   // let api_account : Account = Account::new(api_id, signer);
-    println!("{:?}",apipub);
-    */
+    
+    /*let mut split = user_pk.split(":").map(ToString::to_string)
+    .collect::<Vec<_>>();
+    for s in split {
+        println!("{}", s);
+        user_implicit_key = bs58::encode(s).into_string();
+    }
+*/
+    
     // Initialize contracts
     ft_contract
         .call(&worker, "new_default_meta")
@@ -130,11 +124,17 @@ async fn main() -> anyhow::Result<()> {
     //test_create_api_account(&owner, &ft_contract, &worker).await?;
     test_vault_initialized(&owner, &ft_contract, &worker).await?;
     test_create_api_account(&owner,&alice, &ft_contract, &worker,&api_id,&api_pk).await?;
+    test_reserve_implicit_account(&owner,&alice,&api_account, &ft_contract, &worker,&user_id,&user_pk).await?;
     test_create_user_account(&owner,&alice,&api_account, &ft_contract, &worker,&user_id,&user_pk).await?;
     test_fund_api_account_withFT(&owner,&alice, &ft_contract, &worker,&api_id).await?;
+    test_activate_user_account(&owner,&alice,&api_account,&user_account , &ft_contract, &worker).await?;
+    test_set_owner_allowance(&owner,&alice,&api_account,&user_account , &ft_contract, &worker).await?;
     test_set_user_allowance(&owner,&alice,&api_account,&user_account , &ft_contract, &worker).await?;
+    test_owner_withdraw(&alice,&user_account,&ft_contract,&worker).await?;
+    test_user_withdraw(&alice,&user_account,&ft_contract,&worker).await?;
     //test_simple_withdraw(&owner, &alice, &ft_contract, &worker).await?;
     //test_can_close_empty_balance_account(&bob, &ft_contract, &worker).await?;
+    
     //test_close_account_non_empty_balance(&alice, &ft_contract, &worker).await?;
     //test_close_account_force_non_empty_balance(&alice, &ft_contract, &worker).await?;
     //test_transfer_call_with_burned_amount(&owner, &charlie, &ft_contract, &defi_contract, &worker)
@@ -194,7 +194,29 @@ async fn test_vault_initialized(
     println!("      Passed ✅ vault_initialized");
     Ok(())
 }
-
+async fn test_reserve_implicit_account(
+    owner: &Account,
+    alice: &Account,
+    api_account : &Account,
+    contract: &Contract,
+    worker: &Worker<Sandbox>,
+    implicit_id: &str,
+    apipub: &str,
+) -> anyhow::Result<()> {
+    // fund api account with minimum Near for account creation 
+    let res = alice.transfer_near(worker, api_account.id(), parse_near!("10 N")).await?;
+    let res = api_account
+        .call(&worker, contract.id(), "reserve_user_account")
+        .args_json(json!({"pk":apipub}))?
+        // implicit account registration  
+        .deposit(2_000_000_000_000_000_000_000_000)
+        .transact()
+        .await?;
+    // find proper 
+    println!("      Passed ✅ test_reserve_user_account");
+  
+    Ok(())
+}
 async fn test_create_api_account(
     owner: &Account,
     alice : &Account,
@@ -262,21 +284,69 @@ async fn test_create_user_account(
     worker: &Worker<Sandbox>,
     id: &str,
     apipub: &str,
+
 ) -> anyhow::Result<()> {
 
     // fund api account with minimum Near for account creation 
-    let res = alice.transfer_near(worker, api_account.id(), parse_near!("0.016 N")).await?;
+    let res = alice.transfer_near(worker, api_account.id(), parse_near!("10 N")).await?;
 
     let res = api_account
-        .call(&worker, contract.id(), "create_account")
-        .args_json(json!({"new_account_id":id,"new_public_key":apipub,"vault_allowance":"100"}))?
+        .call(&worker, contract.id(), "create_user_account")
+        .args_json(json!({"new_account_id":id,"new_public_key":apipub}))?
         // implicit account registration  
+        .deposit(4_000_000_000_000_000_000_000_000)
+        .transact()
+        .await?;
+    println!("{:?}",res);
+    assert_eq!(res.is_success(), true);
+ 
+        println!("      Passed ✅ test_create_user_account");
+    Ok(())
+}
+async fn test_activate_user_account(
+    owner: &Account,
+    alice: &Account,
+    api_account : &Account,
+    user_account: &Account,
+    contract: &Contract,
+    worker: &Worker<Sandbox>,
+) -> anyhow::Result<()> {
+
+    // fund api account with minimum Near for account creation 
+    //let res = alice.transfer_near(worker, api_account.id(), parse_near!("0.015 N")).await?;
+   // let res = alice.transfer_near(worker, user_account.id(), parse_near!("0.008 N")).await?;
+    let res = api_account
+        .call(&worker, contract.id(), "activate_implicit_user_account")
+        .args_json(json!({"account_id":user_account.id()}))?
+        .deposit(0)
+        .transact()
+        .await?;
+        
+    //println!("{:?}",res);
+    println!("      Passed ✅ activate_implicit_account");
+    Ok(())
+}
+async fn test_set_owner_allowance(
+    owner: &Account,
+    alice: &Account,
+    api_account : &Account,
+    user_account: &Account,
+    contract: &Contract,
+    worker: &Worker<Sandbox>,
+) -> anyhow::Result<()> {
+
+    // fund api account with minimum Near for account creation 
+    let res = alice.transfer_near(worker, api_account.id(), parse_near!("0.014 N")).await?;
+
+    let res = api_account
+        .call(&worker, contract.id(), "set_available_unites_to_player")
+        .args_json(json!({"account_id":alice.id(),"amount":"100"}))?
         .deposit(0)
         .transact()
         .await?;
         
         assert_eq!(res.is_success(), true);
-        println!("      Passed ✅ test_create_user_account");
+        println!("      Passed ✅ test_set_owner_allowance");
     Ok(())
 }
 async fn test_set_user_allowance(
@@ -289,7 +359,7 @@ async fn test_set_user_allowance(
 ) -> anyhow::Result<()> {
 
     // fund api account with minimum Near for account creation 
-    let res = alice.transfer_near(worker, api_account.id(), parse_near!("0.01 N")).await?;
+    let res = alice.transfer_near(worker, api_account.id(), parse_near!("0.014 N")).await?;
 
     let res = api_account
         .call(&worker, contract.id(), "set_available_unites_to_player")
@@ -302,7 +372,68 @@ async fn test_set_user_allowance(
         println!("      Passed ✅ test_set_user_allowance");
     Ok(())
 }
+async fn test_owner_withdraw(
+    alice: &Account,
+    user_account: &Account,
+    contract: &Contract,
+    worker: &Worker<Sandbox>,
+) -> anyhow::Result<()> {
 
+    // fund api account with minimum Near for account creation 
+    //let res = alice.transfer_near(worker, api_account.id(), parse_near!("0.014 N")).await?;
+
+    let res = alice
+        .call(&worker, contract.id(), "withdraw")
+        .args_json(json!({"amount":"50","memo":"withdaw"}))?
+        .deposit(1)
+        .transact()
+        .await?;
+    let owner_balance: U128 = alice
+        .call(&worker, contract.id(), "ft_balance_of")
+        .args_json(serde_json::json!({
+            "account_id": alice.id()
+        }))?
+        .transact()
+        .await?
+        .json()?;
+    let expect :U128 = U128::from(50);
+    assert_eq!(owner_balance, expect);
+    println!("      Passed ✅ test_owner_withdraw");
+    Ok(())
+}
+async fn test_user_withdraw(
+    alice: &Account,
+    user_account: &Account,
+    contract: &Contract,
+    worker: &Worker<Sandbox>,
+) -> anyhow::Result<()> {
+
+    // fund api account with minimum Near for account creation 
+    //let res = alice.transfer_near(worker, api_account.id(), parse_near!("0.014 N")).await?;
+
+    let res = user_account
+        .call(&worker, contract.id(), "withdraw")
+        .args_json(json!({"amount":"50","memo":"withdraw"}))?
+        .deposit(0)
+        .transact()
+        .await?;
+    println!("{:?}",res);
+    let expect :U128 = U128::from(50);
+    let user_balance: U128 = alice
+        .call(&worker, contract.id(), "ft_balance_of")
+        .args_json(serde_json::json!({
+            "account_id": user_account.id()
+        }))?
+        .transact()
+        .await?
+        .json()?;     
+    assert_eq!(user_balance, expect);
+
+    //
+    //assert_eq!(res.is_success(), true);
+    println!("      Passed ✅ test_user_withdraw");
+    Ok(())
+}
 async fn test_simple_transfer(
     owner: &Account,
     user: &Account,

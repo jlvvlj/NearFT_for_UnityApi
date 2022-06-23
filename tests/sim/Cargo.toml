@@ -22,5 +22,7 @@ name = "integration-tests"
 path = "src/tests.rs"
 
 [dependencies]
+bs58 = "0.4.0"
+hex-string = "0.1.0"
 near-crypto = "0.14.0"
 serde = "1.0.137"
